@@ -462,58 +462,825 @@ class BaseAttributePopover:
     def close(self):
         pass
 
+# -------
+# >>> Tal
+# -------
 
-class AxisAttributesPopover(BaseAttributePopover):
+import math
+import uuid
+import Quartz
+import merz
+import ezui
+from ezui.tools.converters import (
+    makeNumberToStringConverter,
+    makeStringToNumberConverter
+)
+from mojo.UI import inDarkMode
+from designspaceEditor.designspaceLexer import DesignspaceLexer
+from designspaceEditor.parsers import mapParser
 
-    def build(self, item):
-        """
-        support:
-            * map
-            * labels
-        """
+numberToStringConverter = makeNumberToStringConverter("number")
+stringToNumberConverter = makeStringToNumberConverter(
+    fallback=None,
+    minValue=None,
+    maxValue=None
+)
+
+def formatMappingItem(location):
+    return f"{numberToStringConverter(location[0])} > {numberToStringConverter(location[1])}"
+
+def mapItemDict(**kwargs):
+    d = dict(
+        userValue=None,
+        designValue=None,
+        comment=None,
+        invalid=None,
+        id=str(uuid.uuid4())
+    )
+    d.update(kwargs)
+    return d
+
+def parseMapIntoDicts(text):
+    """
+    Convert the text to a list of dicts with each
+    dict representing a line. The dict form:
+
+        {
+            userValue : None | number
+            designValue : None | number
+            comment : None | string
+            invalid : None | string
+            id : uuid4 string
+        }
+
+    To parse, each line has its comment split
+    and added to the dict. The content of the
+    line to the left of the comment will be parsed
+    to extract userValue and designValue. If
+    parsing fails, the content of the line to
+    the left of the comment will be stored
+    in the dict at the invalid key.
+    """
+    text = text.strip()
+    mapping = []
+    for line in text.splitlines():
+        data = mapItemDict()
+        mapping.append(data)
+        line = line.strip()
+        if "#" in line:
+            line, comment = line.split("#", 1)
+            data["comment"] = comment.strip()
+        if ">" not in line:
+            data["invalid"] = line
+            continue
+        userValue, designValue = line.split(">", 1)
+        userValue = userValue.strip()
+        designValue = designValue.strip()
+        uV = stringToNumberConverter(userValue)
+        dV = stringToNumberConverter(designValue)
+        if uV is None or dV is None:
+            data["invalid"] = line
+            continue
+        data["userValue"] = uV
+        data["designValue"] = dV
+    return mapping
+
+def parseMap(text=None, mapping=None):
+    """
+    Convert the text to a list of (userValue, designValue).
+    A mapping from parseMapIntoDicts can be given instead of text.
+
+    Invalid lines will be ignored.
+    """
+    if text is not None:
+        mapping = parseMapIntoDicts(text)
+    streamlined = []
+    for data in mapping:
+        if data["invalid"]:
+            continue
+        userValue = data["userValue"]
+        designValue = data["designValue"]
+        if any((userValue is None, designValue is None)):
+            continue
+        streamlined.append((userValue, designValue))
+    return streamlined
+
+def dumpMap(mapping):
+    """
+    Convert the dict structures from
+    parseMapIntoDicts to a string.
+    """
+    text = []
+    for data in mapping:
+        userValue = data["userValue"]
+        designValue = data["designValue"]
+        comment = data["comment"]
+        invalid = data["invalid"]
+        line = []
+        if invalid:
+            line.append(invalid)
+        elif None not in (userValue, designValue):
+            line.append(formatMappingItem((userValue, designValue)))
+        if comment:
+            line.append("# " + comment)
+        line = " ".join(line)
+        text.append(line)
+    text = "\n".join(text)
+    return text
+
+class AxisAttributesPopover(ezui.WindowController):
+
+    def build(self,
+            listView=None,
+            operator=None,
+            closeCallback=None
+        ):
+        tableView = listView.getNSTableView()
+        index = listView.getSelection()[0]
+        item = listView[index]
+        relativeRect = tableView.rectOfRow_(index)
+        self.operator = operator
+        self.closeCallback = closeCallback
         self.axisDescriptor = item.axisDescriptor
         self.isDiscreteAxis = item.axisIsDescrete()
 
-        self.popover.tabs = vanilla.Tabs((0, 15, -0, -0), ["Map", "Axis Labels"])
+        self.loadGraphSettings()
 
-        self.axisMap = self.popover.tabs[0]
-        self.axisLabels = self.popover.tabs[1]
+        self.viewWidth = 400
+        self.viewHeight = 400
+        self.viewInset = 50
+        self.graphWidth = self.viewWidth - (self.viewInset * 2)
+        self.graphHeight = self.viewHeight - (self.viewInset * 2)
+        self.locationDotSize = 10
 
-        self.axisMap.editor = CodeEditor(
-            (10, 10, -10, -10),
-            mapParser.dumpMap(self.axisDescriptor.map),
-            lexer=DesignspaceLexer(),
-            showLineNumbers=False,
-            callback=self.axisMapEditorCallback
+        content = """
+        = Tabs
+        * Tab Map = HorizontalStack
+        > * CodeEditor      @mappingTextEditor
+        > * MerzView        @mappingGraphEditor
+        * Tab Axis Labels
+        > * CodeEditor      @labelsTextEditor
+        """
+        descriptionData = dict(
+            mappingTextEditor=dict(
+                width=self.viewWidth,
+                lexer=DesignspaceLexer(),
+                showLineNumbers=False,
+            ),
+            mappingGraphEditor=dict(
+                backgroundColor=self.graphColors["background"],
+                delegate=self,
+                width=self.viewWidth,
+                height=self.viewHeight,
+            ),
+            labelsTextEditor=dict(
+                width="fill",
+                height="fill",
+                lexer=DesignspaceLexer(),
+                showLineNumbers=False
+            )
         )
-        # if self.isDiscreteAxis:
-        #     self.axisMap.editor.setPosSize((10, 40, -10, -10))
-        #     self.axisMap.editor.getNSTextView().setEditable_(False)
-        #     self.axisMap.info = vanilla.TextBox((10, 10, -10, 22), "A discrete axis with a map does not make sense.")
-
-        self.axisLabels.editor = CodeEditor(
-            (10, 10, -10, -10),
-            labelsParser.dumpAxisLabels(self.axisDescriptor.labelNames, self.axisDescriptor.axisLabels),
-            lexer=DesignspaceLexer(),
-            showLineNumbers=False,
-            callback=self.axisLabelsEditorCallback
+        self.w = ezui.EZPopover(
+            content=content,
+            descriptionData=descriptionData,
+            controller=self
+        )
+        self.w.bind("will close", self.windowWillClose)
+        self.w.open(
+            parent=tableView,
+            parentAlignment="bottom",
+            location=relativeRect
         )
 
-    def axisMapEditorCallback(self, sender):
-        self.controlEditCallback(sender)
+        self.graphEditor = self.w.getItem("mappingGraphEditor")
+        self.graphEditorContainer = self.graphEditor.getMerzContainer()
+        self.graphContainer = self.graphEditorContainer.appendBaseSublayer(
+            name="graphContainer",
+            size=(self.graphWidth, self.graphHeight),
+            position=("center", "center"),
+        )
+        self.graphDesignAxisLabelLayer = self.graphContainer.appendTextBoxSublayer(
+            text="Design Values",
+            size=(self.graphHeight, 20),
+            position=(-5, 0),
+            **self.graphTextProperties["axisLabel"]
+        )
+        angle = math.radians(90)
+        transform = Quartz.CGAffineTransformMakeRotation(angle)
+        transform = Quartz.CATransform3DMakeAffineTransform(transform)
+        layer = self.graphDesignAxisLabelLayer.getCALayer()
+        layer.setTransform_(transform)
+        self.graphUserAxisLabelLayer = self.graphContainer.appendTextBoxSublayer(
+            text="User Values",
+            size=(self.graphWidth, 20),
+            position=(0, -30),
+            **self.graphTextProperties["axisLabel"]
+        )
+        self.graphInstancesPath = self.graphContainer.appendPathSublayer(
+            name="graphInstances",
+            strokeWidth=2,
+            strokeCap="round",
+            strokeDash=(0, 4)
+        )
+        self.graphSourcesPath = self.graphContainer.appendPathSublayer(
+            name="graphSources",
+            strokeWidth=2,
+            strokeCap="round",
+            strokeDash=(0, 4)
+        )
+        self.graphDefaultUserValueLine = self.graphContainer.appendLineSublayer(
+            name="defaultUserValueLine",
+            strokeWidth=1
+        )
 
-    def axisLabelsEditorCallback(self, sender):
-        self.controlEditCallback(sender)
+        self.graphBorder = self.graphContainer.appendBaseSublayer(
+            name="graphBorder",
+            size=(self.graphWidth, self.graphHeight),
+            position=("center", "center"),
+            borderWidth=1
+        )
+        self.graphLinearReferenceLine = self.graphContainer.appendLineSublayer(
+            name="linearReferenceLine",
+            startPoint=(0, 0),
+            endPoint=(self.graphWidth, self.graphHeight),
+            strokeWidth=2,
+            strokeCap="round",
+            strokeDash=(0, 4)
+        )
+        self.graphLocationLine = self.graphContainer.appendPathSublayer(
+            name="locationLine",
+            fillColor=None,
+            strokeWidth=1
+        )
+        self.graphLocationDotContainer = self.graphContainer.appendBaseSublayer(
+            name="locationContainer",
+            size=(self.graphWidth, self.graphHeight)
+        )
+        self.graphlocationLabelContainer = self.graphContainer.appendBaseSublayer(
+            name="locationLabelContainer",
+            size=(self.graphWidth, self.graphHeight)
+        )
+        self.populateGraphSettings()
 
-    def close(self):
+        self._loadMapping()
+        self._loadLabels()
+
+    def started(self):
+        self.w.open()
+
+    def destroy(self):
+        self.closeCallback = None
+
+    controlEdited = False
+
+    def controlEditCallback(self, sender=None):
+        self.controlEdited = True
+
+    def windowWillClose(self, sender):
+        self.w.unbind("will close", self.windowWillClose)
+        if not self.controlEdited:
+            return
         if not self.isDiscreteAxis:
-            self.axisDescriptor.map = mapParser.parseMap(self.axisMap.editor.get())
+            self.axisDescriptor.map = parseMap(mapping=self.mapping)
             SendNotification.single("AxisMap", designspace=self.operator)
-
-        labelNames, axisLabels = labelsParser.parseAxisLabels(self.axisLabels.editor.get())
+        labelNames, axisLabels = labelsParser.parseAxisLabels(self.w.getItemValue("labelsTextEditor"))
         self.axisDescriptor.labelNames = labelNames
         self.axisDescriptor.axisLabels = axisLabels
         SendNotification.single("AxisLabels", designspace=self.operator)
+
+    def _loadLabels(self):
+        text = labelsParser.dumpAxisLabels(
+            self.axisDescriptor.labelNames,
+            self.axisDescriptor.axisLabels
+        )
+        self.w.setItemValue("labelsTextEditor", text)
+
+    def _loadMapping(self):
+        mapping = self.axisDescriptor.map
+        mappingText = None
+        defaultUserValue = self.axisDescriptor.default
+        # XXX load these from the operator
+        instanceUserValues = []
+        sourceDesignValues = []
+
+        if mappingText is not None:
+            mapping = parseMapIntoDicts(mappingText)
+        else:
+            mapping = [
+                mapItemDict(userValue=userValue, designValue=designValue)
+                for (userValue, designValue) in mapping
+            ]
+        self.mapping = mapping
+        self._buildMappingDerivatives()
+        self.defaultUserValue = defaultUserValue
+        self.instanceUserValues = instanceUserValues
+        self.sourceDesignValues = sourceDesignValues
+        self.populateMappingTextEditor()
+        self.populateGraphEditor()
+
+    """
+    self.mapping is the canonical list of mappingDicts.
+    When it is created, self._buildMappingDerivatives
+    must be called. This will create:
+
+    - self.idToMappingDict:
+        {
+            id : mappingDict
+        }
+
+    Because the mappingDicts are mutable, getting
+    a mappingDict from any derivative and changing
+    it will update the dict in all places.
+    """
+
+    def _buildMappingDerivatives(self):
+        self.idToMappingData = {
+            data["id"] : data
+            for data in self.mapping
+        }
+
+    # Label Text Editor
+
+    def labelsTextEditorCallback(self, sender):
+        self.controlEditCallback()
+
+    # Graph Text Editor
+
+    def populateMappingTextEditor(self):
+        text = dumpMap(self.mapping)
+        self.w.setItemValue("mappingTextEditor", text)
+
+    def mappingTextEditorCallback(self, sender):
+        text = sender.get()
+        self.mapping = parseMapIntoDicts(text)
+        self._buildMappingDerivatives()
+        self.populateGraphEditor()
+        self.controlEditCallback()
+
+    # Graph Settings
+
+    def loadGraphSettings(self):
+        # https://github.com/LettError/designSpaceRoboFontExtension/blob/master/icons/makeIcons_dse2.py
+
+        darkMode = inDarkMode()
+
+        def orange(a=1):
+            return (1, 0.45, 0, a)
+
+        def yellow(a=1):
+            return (1, 0.8, 0, a)
+
+        def red(a=1):
+            return (1, 0.2, 0, a)
+
+        def pink(a=1):
+            return (1, 0.2, 0.75, a)
+
+        def blue(a=1):
+            return (0.1, 0.1, 0.8, a)
+
+        def background(a=1):
+            if darkMode:
+                return (0, 0, 0, a)
+            else:
+                return (1, 1, 1, a)
+
+        def axisLabel(a=1):
+            if darkMode:
+                return (0.22, 0.22, 0.22, a)
+            else:
+                return (0.8, 0.8, 0.8, a)
+
+        def border(a=1):
+            if darkMode:
+                return (0.12, 0.12, 0.12, a)
+            else:
+                return (0.9, 0.9, 0.9, a)
+
+        def grid(a=1):
+            if darkMode:
+                return (1, 1, 1, a)
+            else:
+                return (0, 0, 0, a)
+
+        def location(a=1):
+            return orange(a)
+
+        def locationSelected(a=1):
+            if darkMode:
+                return pink(a)
+            else:
+                return blue(a)
+
+        def userDefaultLocation(a=1):
+            return yellow(a)
+
+        def instance(a=1):
+            return border(a)
+
+        def source(a=1):
+            return border(a)
+
+        self.graphColors = dict(
+            background=background(),
+            axisLabel=axisLabel(),
+            border=border(),
+            instance=instance(),
+            source=source(),
+            defaultUserValue=userDefaultLocation(0.5),
+            locationLine=location(0.6),
+            locationDot=location(),
+            locationDotSelected=locationSelected(),
+            locationLabel=location(),
+            locationLabelSelected=locationSelected(),
+            locationLabelBackground=background(0.4)
+        )
+
+        locationLabel = dict(
+            offset=(0, 5),
+            padding=(3, 2),
+            horizontalAlignment="center",
+            verticalAlignment="bottom",
+            fillColor=self.graphColors["locationLabel"],
+            backgroundColor=self.graphColors["locationLabelBackground"],
+            pointSize=10,
+            weight="regular"
+        )
+        locationLabelSelected = dict(locationLabel)
+        locationLabelSelected["fillColor"] = self.graphColors["locationLabelSelected"]
+
+        axisLabel = dict(
+            fillColor=self.graphColors["axisLabel"],
+            horizontalAlignment="center",
+            pointSize=12
+        )
+
+        self.graphTextProperties = dict(
+            locationLabel=locationLabel,
+            locationLabelSelected=locationLabelSelected,
+            axisLabel=axisLabel
+        )
+
+    def populateGraphSettings(self):
+        self.graphContainer.setBackgroundColor(self.graphColors["background"])
+        self.graphInstancesPath.setStrokeColor(self.graphColors["instance"])
+        self.graphSourcesPath.setStrokeColor(self.graphColors["source"])
+        self.graphDefaultUserValueLine.setStrokeColor(self.graphColors["defaultUserValue"])
+        self.graphBorder.setBorderColor(self.graphColors["border"])
+        self.graphLinearReferenceLine.setStrokeColor(self.graphColors["border"])
+        self.graphLocationLine.setStrokeColor(self.graphColors["locationLine"])
+        self.graphUserAxisLabelLayer.setPropertiesByName(self.graphTextProperties["axisLabel"])
+        self.graphDesignAxisLabelLayer.setPropertiesByName(self.graphTextProperties["axisLabel"])
+
+    # Graph Data
+
+    def populateGraphEditor(self):
+        """
+        Call this when the text editor makes a change.
+        """
+        # calculate constants needed for converting values
+        userMinValue = self.axisDescriptor.minimum
+        userMaxValue = self.axisDescriptor.maximum
+        designMinValue = 0
+        designMaxValue = 1
+        # XXX is this deduction safe?
+        mappingValues = parseMap(mapping=self.mapping)
+        designValues = [i[1] for i in mappingValues]
+        if designValues:
+            designMinValue = min(designValues)
+            designMaxValue = max(designValues)
+        self.userMinValue = userMinValue
+        self.userMaxValue = userMaxValue
+        self.designMinValue = designMinValue
+        self.designMaxValue = designMaxValue
+
+        # clear existing items
+        self.deselectGraphItem()
+        self.graphLocationDotContainer.clearSublayers()
+        self.graphlocationLabelContainer.clearSublayers()
+
+        # build items
+        self.graphItems = {}
+        sorter = [
+            (data["userValue"], data["designValue"], data["id"])
+            for data in self.mapping
+            if None not in (data["userValue"], data["designValue"])
+        ]
+        sorter.sort()
+        for i, sortable in enumerate(sorter):
+            id = sortable[-1]
+            data = self.idToMappingData[id]
+            acceptsHit = i not in (0, len(sorter) - 1)
+            self.addGraphItem(data, acceptsHit=acceptsHit)
+
+        # update the line
+        self._populateGraphLocationLine()
+
+        with self.graphDefaultUserValueLine.propertyGroup():
+            x, _ = self.calculateGraphPositionFromUserAndDesignValue((self.defaultUserValue, 0))
+            y1 = 0
+            y2 = self.graphHeight
+            if x in (0, self.graphWidth):
+                y1 = y2 = 0
+            self.graphDefaultUserValueLine.setStartPoint((x, y1))
+            self.graphDefaultUserValueLine.setEndPoint((x, y2))
+        pen = merz.MerzPen()
+        for userValue in self.instanceUserValues:
+            x, _ = self.calculateGraphPositionFromUserAndDesignValue((userValue, 0))
+            if x in (0, self.graphWidth):
+                continue
+            pen.moveTo((x, 0))
+            pen.lineTo((x, self.graphHeight))
+            pen.endPath()
+        with self.graphInstancesPath.propertyGroup():
+            self.graphInstancesPath.setPath(pen.path)
+        pen = merz.MerzPen()
+        for designValue in self.sourceDesignValues:
+            _, y = self.calculateGraphPositionFromUserAndDesignValue((0, designValue))
+            if y in (0, self.graphHeight):
+                continue
+            pen.moveTo((0, y))
+            pen.lineTo((self.graphWidth, y))
+            pen.endPath()
+        with self.graphSourcesPath.propertyGroup():
+            self.graphSourcesPath.setPath(pen.path)
+
+    def _reloadGraphData(self):
+        self.populateGraphEditor()
+
+    def addGraphItem(self, data, acceptsHit=True):
+        if isinstance(data, list):
+            datas = data
+        else:
+            datas = [data]
+        dotLayers = []
+        textLayers = []
+        for data in datas:
+            userValue = data["userValue"]
+            designValue = data["designValue"]
+            id = data["id"]
+            x, y = self.calculateGraphPositionFromUserAndDesignValue((userValue, designValue))
+            dotLayer = merz.Oval(
+                acceptsHit=acceptsHit,
+                size=(self.locationDotSize, self.locationDotSize),
+                position=(x, y),
+                anchor=(0.5, 0.5),
+                fillColor=self.graphColors["locationDot"]
+            )
+            textLayer = merz.TextLine(
+                text=formatMappingItem((userValue, designValue)),
+                position=(x, y),
+                **self.graphTextProperties["locationLabel"]
+            )
+            dotLayer.setInfoValue("id", id)
+            textLayer.setInfoValue("id", id)
+            dotLayers.append(dotLayer)
+            textLayers.append(textLayer)
+            self.graphItems[id] = dict(
+                dotLayer=dotLayer,
+                textLayer=textLayer
+            )
+        with self.graphLocationDotContainer.sublayerGroup():
+            for dotLayer in dotLayers:
+                self.graphLocationDotContainer.appendSublayer(dotLayer)
+        with self.graphlocationLabelContainer.sublayerGroup():
+            for textLayer in textLayers:
+                self.graphlocationLabelContainer.appendSublayer(textLayer)
+
+    def _populateGraphLocationLine(self):
+        positions = [
+            layer.getPosition()
+            for layer in self.graphLocationDotContainer.getSublayers()
+        ]
+        positions.sort()
+        pen = merz.MerzPen()
+        for i, position in enumerate(positions):
+            x, y = position
+            if i == 0:
+                pen.moveTo((x, y))
+            else:
+                pen.lineTo((x, y))
+        pen.endPath()
+        self.graphLocationLine.setPath(pen.path)
+
+    # Graph Location Conversions
+
+    def calculateRelativeUserValue(self, location):
+        value = (location - self.userMinValue) / (self.userMaxValue - self.userMinValue)
+        return value
+
+    def calculateRelativeDesignValue(self, location):
+        value = (location - self.designMinValue) / (self.designMaxValue - self.designMinValue)
+        return value
+
+    def calculateUserAndDesignValuesFromGraphPosition(self, position):
+        x, y = position
+        userRelativeLocation = x / self.graphWidth
+        designRelativeLocation = y / self.graphWidth
+        userValue = self.userMinValue + ((self.userMaxValue - self.userMinValue) * userRelativeLocation)
+        designValue = self.designMinValue + ((self.designMaxValue - self.designMinValue) * designRelativeLocation)
+        return (userValue, designValue)
+
+    def calculateGraphPositionFromUserAndDesignValue(self, location):
+        userValue, designValue = location
+        userRelativeValue = self.calculateRelativeUserValue(userValue)
+        designRelativeValue = self.calculateRelativeDesignValue(designValue)
+        x = self.graphWidth * userRelativeValue
+        y = self.graphHeight * designRelativeValue
+        return (x, y)
+
+    # Graph Items
+
+    selectedGraphItemDotLayer = None
+    selectedGraphItemTextLayer = None
+
+    def moveSelectedGraphItem(self, event=None, increment=None):
+        if self.selectedGraphItemDotLayer is None:
+            return
+        if event is not None:
+            x, y = self._convertEventToPoint(event, self.graphContainer)
+        elif increment is not None:
+            x, y = self.selectedGraphItemDotLayer.getPosition()
+            x += increment[0]
+            y += increment[1]
+        else:
+            raise NotImplementedError
+        if x < 0:
+            x = 0
+        elif x > self.graphWidth:
+            x = self.graphWidth
+        if y < 0:
+            y = 0
+        elif y > self.graphHeight:
+            y = self.graphHeight
+        id = self.selectedGraphItemDotLayer.getInfoValue("id")
+        mappingData = self.idToMappingData[id]
+        userValue, designValue = self.calculateUserAndDesignValuesFromGraphPosition((x, y))
+        mappingData["userValue"] = userValue
+        mappingData["designValue"] = designValue
+        self.selectedGraphItemDotLayer.setPosition((x, y))
+        with self.selectedGraphItemTextLayer.propertyGroup():
+            self.selectedGraphItemTextLayer.setPosition((x, y))
+            self.selectedGraphItemTextLayer.setText(formatMappingItem((userValue, designValue)))
+        self._populateGraphLocationLine()
+        self.populateMappingTextEditor()
+        self.controlEditCallback()
+
+    def deleteSelectedGraphItem(self):
+        if self.selectedGraphItemDotLayer is None:
+            return
+        id = self.selectedGraphItemDotLayer.getInfoValue("id")
+        self.deselectGraphItem()
+        self.mapping = [
+            data
+            for data in self.mapping
+            if data["id"] != id
+        ]
+        self._reloadGraphData()
+        self.populateMappingTextEditor()
+        self.controlEditCallback()
+
+    def selectGraphItem(self, id):
+        self.deselectGraphItem()
+        data = self.graphItems[id]
+        dotLayer = data["dotLayer"]
+        textLayer = data["textLayer"]
+        self.selectedGraphItemDotLayer = dotLayer
+        self.selectedGraphItemTextLayer = textLayer
+        dotLayer.setFillColor(self.graphColors["locationDotSelected"])
+        textLayer.setPropertiesByName(self.graphTextProperties["locationLabelSelected"])
+
+    def deselectGraphItem(self):
+        if self.selectedGraphItemDotLayer is None:
+            return
+        id = self.selectedGraphItemDotLayer.getInfoValue("id")
+        data = self.graphItems[id]
+        dotLayer = data["dotLayer"]
+        textLayer = data["textLayer"]
+        dotLayer.setFillColor(self.graphColors["locationDot"])
+        textLayer.setPropertiesByName(self.graphTextProperties["locationLabel"])
+        self.selectedGraphItemDotLayer = None
+        self.selectedGraphItemTextLayer = None
+
+    def selectNeighborGraphItem(self, direction):
+        if self.selectedGraphItemDotLayer is None:
+            return
+        sorter = []
+        for id in self.graphItems.keys():
+            data = self.idToMappingData[id]
+            sorter.append((data["userValue"], data["designValue"], id))
+        sorter.sort()
+        selectedID = self.selectedGraphItemDotLayer.getInfoValue("id")
+        selectedSortable = (
+            self.idToMappingData[selectedID]["userValue"],
+            self.idToMappingData[selectedID]["designValue"],
+            selectedID
+        )
+        selectedIndex = sorter.index(selectedSortable)
+        newSelectionIndex = selectedIndex + direction
+        if newSelectionIndex == -1:
+            newSelectionIndex = len(sorter) - 1
+        elif newSelectionIndex == len(sorter):
+            newSelectionIndex = 0
+        newSelectionID = sorter[newSelectionIndex][-1]
+        self.selectGraphItem(newSelectionID)
+
+    # Graph Delegate Methods
+
+    def acceptsFirstResponder(self, sender):
+        return True
+
+    def _convertEventToPoint(self, event, layer=None):
+        event = merz.unpackEvent(event)
+        location = event["location"]
+        location = self.graphEditor.convertWindowCoordinateToViewCoordinate(
+            point=location
+        )
+        point = self.graphEditorContainer.convertViewCoordinateToLayerCoordinate(
+            location,
+            self.graphEditorContainer
+        )
+        if layer is not None:
+            point = layer.convertOtherLayerCoordinateToLayerCoordinate(point, self.graphEditorContainer)
+        return point
+
+    def mouseDown(self, sender, event):
+        nsEvent = event
+        point = self._convertEventToPoint(nsEvent)
+        event = merz.unpackEvent(nsEvent)
+        if event["clickCount"] == 1:
+            hits = self.graphEditorContainer.findSublayersContainingPoint(
+                point,
+                onlyAcceptsHit=True,
+                recurse=True
+            )
+            self.deselectGraphItem()
+            if hits:
+                layer = hits[0]
+                id = layer.getInfoValue("id")
+                self.selectGraphItem(id)
+            else:
+                self.selectedGraphItemDotLayer = None
+                self.selectedGraphItemTextLayer = None
+        elif event["clickCount"] == 2:
+            x, y = self._convertEventToPoint(nsEvent, self.graphContainer)
+            userValue, designValue = self.calculateUserAndDesignValuesFromGraphPosition((x, y))
+
+            data = mapItemDict(
+                userValue=userValue,
+                designValue=designValue
+            )
+            self.mapping.append(data)
+            self._buildMappingDerivatives()
+
+            id = data["id"]
+            self.addGraphItem(data)
+            self.selectGraphItem(id)
+            self._populateGraphLocationLine()
+            self.populateMappingTextEditor()
+
+    def mouseDragged(self, sender, event):
+        if self.selectedGraphItemDotLayer is not None:
+            self.moveSelectedGraphItem(event=event)
+
+    def mouseUp(self, sender, event):
+        pass
+
+    def keyDown(self, sender, event):
+        event = merz.unpackEvent(event)
+        character = event["character"]
+        factor = 0.01
+        # XXX add modifiers to factor
+        arrowEvents = dict(
+            left=(-self.graphWidth * factor, 0),
+            right=(self.graphWidth * factor, 0),
+            up=(0, self.graphHeight * factor),
+            down=(0, -self.graphHeight * factor),
+        )
+        # arrow
+        if character in arrowEvents:
+            increment = arrowEvents[character]
+            self.moveSelectedGraphItem(increment=increment)
+        # tab
+        elif character == "\t":
+            self.selectNeighborGraphItem(1)
+        elif character == "\x19":
+            self.selectNeighborGraphItem(-1)
+        # delete
+        elif character == "\x7f":
+            self.deleteSelectedGraphItem()
+
+    # RoboFont Observations
+
+    # XXX makes this a subclass of Subscriber?
+
+    # def roboFontAppearanceChanged(self, info):
+    #     self.loadGraphSettings()
+    #     self._reloadGraphData()
+
+# -------
+# <<< Tal
+# -------
 
 
 class SourceAttributesPopover(BaseAttributePopover):
@@ -2008,7 +2775,8 @@ if __name__ == '__main__':
     pathForBundle = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     designspaceBundle = ExtensionBundle(path=pathForBundle)
 
-    path = "/Users/frederik/Documents/dev/letterror/mutatorSans/MutatorSans.designspace"
+    # path = "/Users/frederik/Documents/dev/letterror/mutatorSans/MutatorSans.designspace"
     # path = "/Users/frederik/Documents/fontsGit/RoboType/RF.designspace"
+    path = "/Users/tal/Work/Typefaces 2024/Pacific/design/GDP Pacific-Roman.designspace"
     # path = None
     DesignspaceEditorController(path)
